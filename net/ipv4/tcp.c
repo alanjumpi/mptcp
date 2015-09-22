@@ -272,6 +272,13 @@
 #include <net/icmp.h>
 #include <net/inet_common.h>
 #include <net/mptcp.h>
+#include <net/mptcp_v4.h>
+
+#if IS_ENABLED(CONFIG_IPV6)
+#include <net/mptcp_v6.h>
+#endif
+
+
 #include <net/tcp.h>
 #include <net/xfrm.h>
 #include <net/ip.h>
@@ -2495,6 +2502,67 @@ static int tcp_repair_options_est(struct tcp_sock *tp,
 	return 0;
 }
 
+//MPTCP API add subflow
+static int mptcp_add_subflow(struct sock *sk, char *num_subflows)
+{
+  // 1) get/declare mptcp socket 
+  struct sock *meta_sk = tcp_sk(sk)->mpcb->meta_sk;
+  struct tcp_sock *tp = tcp_sk(meta_sk);
+  int iter = 0;
+
+  printk("Phase 2 - Function init\n");
+
+  // 2) check if mptcp and ndiffports is enabled
+  if(!sysctl_mptcp_enabled && !tp->ndiffports)
+    return -EACCES;
+
+  printk("Phase 3 - MPTCP enabled\n");
+  printk("Phase 4 - mptcp with ndiffports enabled\n");
+  printk("Phase 5 - number of subflows: %d\n", num_subflows[0]);
+
+  int nsubflows;
+  nsubflows = num_subflows[0];
+
+  // 3) Add subflows using num_subflows defined by user
+  for (iter = 0; iter < nsubflows; iter++) {
+      if (meta_sk->sk_family == AF_INET ||
+              mptcp_v6_is_v4_mapped(meta_sk)) {
+          struct mptcp_loc4 loc;
+          struct mptcp_rem4 rem;
+          printk("Phase 6 - Structure local and remote declared\n");
+          loc.addr.s_addr = inet_sk(meta_sk)->inet_saddr;
+          loc.loc4_id = 0;
+          loc.low_prio = 0;
+
+          rem.addr.s_addr = inet_sk(meta_sk)->inet_daddr;
+          rem.port = inet_sk(meta_sk)->inet_dport;
+          rem.rem4_id = 0; // Default 0 
+
+          mptcp_init4_subsockets(meta_sk, &loc, &rem);
+      } else {
+          //3.2) has IPV6?
+#if IS_ENABLED(CONFIG_IPV6)
+          struct mptcp_loc6 loc;
+          struct mptcp_rem6 rem;
+
+          loc.addr = inet6_sk(meta_sk)->saddr;
+          loc.loc6_id = 0;
+          loc.low_prio = 0;
+
+          rem.addr = meta_sk->sk_v6_daddr;
+          rem.port = inet_sk(meta_sk)->inet_dport;
+          rem.rem6_id = 0; // Default 0 
+
+          mptcp_init6_subsockets(meta_sk, &loc, &rem);
+#endif
+          //
+      }
+      printk("Final Phase - MPTCP subflows added\n");
+  }
+  //
+  return 0;
+}
+
 struct mptcp_pm_ops *mptcp_pm_find(const char *name);
 struct mptcp_sched_ops *mptcp_sched_find(const char *name);
 
@@ -2568,7 +2636,17 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 			return -EFAULT;
 		return 0;
 	}
-	case TCP_MULTIPATH_ADD:
+	case TCP_MULTIPATH_ADD: {
+            
+                lock_sock(sk);
+                
+                printk("Phase 1 - select-case\n");
+                err = mptcp_add_subflow(sk, optval);
+                release_sock(sk);
+
+                return err;
+ 
+        }
 	case TCP_MULTIPATH_REMOVE:
 		/* Implement Me! */
 		return -EOPNOTSUPP;
@@ -3078,9 +3156,11 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
 		val = tp->ndiffports;
 		break;
 	case TCP_MULTIPATH_SUBFLOWS:
-	case TCP_MULTIPATH_CONNID:
-		/* Implement Me! */
+                /* Implement Me! */
 		return -EOPNOTSUPP;
+	case TCP_MULTIPATH_CONNID: 
+                val = tp->mptcp_loc_key;
+                break;
 
 	case TCP_MULTIPATH_PATHMANAGER: {
 			if (get_user(len, optlen))
